@@ -106,74 +106,94 @@ class LeadSystem(ctk.CTk):
         self.log("Parada solicitada...")
         self.btn_stop.configure(state="disabled")
 
-    def start_process(self):
+        def start_process(self):
         # 1. RESET E PREPARAÇÃO DA UI
         self.after(0, lambda: self.progress_bar.set(0))
         self.after(0, lambda: self.lbl_total.configure(text="Total: 0"))
         self.after(0, lambda: self.lbl_completos.configure(text="Email: 0"))
         self.log("Iniciando processo...")
 
+        interrupted = False  # <--- FLAG PARA SABER SE O USUÁRIO PAROU
+        all_leads = []
+
         try:
-            # Leitura dos arquivos
             with open(self.file_cities.get(), 'r') as f:
                 cidades = [l.strip() for l in f if l.strip()]
             with open(self.file_niches.get(), 'r') as f:
                 nichos = [l.strip() for l in f if l.strip()]
 
             total_queries = len(cidades) * len(nichos)
-            all_leads = []
             count_total = 0
             count_email = 0
             current_query = 0
 
             for nicho in nichos:
                 for cidade in cidades:
-                    # Verifica se o usuário pediu para parar
                     if self.stop_event.is_set():
-                        self.log(">>> Processo cancelado pelo usuário.")
-                        return
+                        interrupted = True
+                        break  # Sai do loop das cidades
 
                     current_query += 1
                     query = f"{nicho} em {cidade}"
                     self.log(f"Busca: {query}")
 
-                    # Executa a busca
                     leads = self.scraper.run(query, self.scroll_val.get())
 
-                    # Processamento dos leads
                     for item in leads:
-                        if self.stop_event.is_set(): return
+                        if self.stop_event.is_set():
+                            interrupted = True
+                            break  # Sai do loop dos itens
 
                         count_total += 1
                         email = extract_email(item['Site'])
                         if email:
                             item['Email'] = email
                             all_leads.append(item)
+                            self.save_lead_incremental(item)
                             count_email += 1
+
+                    if interrupted: break  # Sai do loop das cidades se foi interrompido
 
                     # Atualização fluida da UI
                     progress = current_query / total_queries
-                    self.after(0, lambda p=progress, t=count_total, e=count_email: [
-                        self.progress_bar.set(p),
-                        self.lbl_total.configure(text=f"Total: {t}"),
-                        self.lbl_completos.configure(text=f"Email: {e}")
-                    ])
+                    self.after(0, lambda p=progress, t=count_total, e=count_email: self._update_stats(p, t, e))
 
-            # Salvar final
-            output_path = os.path.join(self.output_dir.get(), "data.csv")
-            self.cleaner.save_and_clean(all_leads, filename=output_path)
-            self.log("Processo concluído com sucesso!")
-            self.after(0, lambda: messagebox.showinfo("Sucesso", f"Concluído!\nLeads salvos: {count_email}"))
+                if interrupted: break  # Sai do loop dos nichos se foi interrompido
+
+            if all_leads:
+                output_path = os.path.join(self.output_dir.get(), "data.csv")
+                self.cleaner.save_and_clean(all_leads, filename=output_path)
+                msg = f"Processo finalizado!\nLeads salvos: {len(all_leads)}"
+                self.log(msg)
+                self.after(0, lambda: messagebox.showinfo("Sucesso", msg))
+            else:
+                self.log("Processo encerrado sem dados para salvar.")
+
 
         except Exception as e:
             self.log(f"ERRO: {e}")
-            self.after(0, lambda: messagebox.showerror("Erro", f"Ocorreu um erro:\n{e}"))
+            self.after(0, lambda err=e: messagebox.showerror("Erro", f"Ocorreu um erro:\n{err}"))
 
         finally:
-            # Reseta a UI ao final (sucesso ou erro)
             self.after(0, lambda: self.btn_start.configure(state="normal", text="INICIAR"))
             self.after(0, lambda: self.btn_stop.configure(state="disabled"))
             self.after(0, lambda: self.progress_bar.set(0))
+
+        # Cuidar de crashes/fechamento do programa antes da conclusão da busca
+        def save_lead_incremental(self, lead):
+        output_path = os.path.join(self.output_dir.get(), "data.csv")
+        fieldnames = ['Nome', 'Site', 'Email', 'Telefone']
+
+        file_exists = os.path.exists(output_path)
+
+        with open(output_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(lead)
+    
+    
     def _update_stats(self, progress, total, email):
         self.progress_bar.set(progress)
         self.lbl_total.configure(text=f"Total: {total}")
